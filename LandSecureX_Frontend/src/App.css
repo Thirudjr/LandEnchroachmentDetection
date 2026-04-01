@@ -265,18 +265,102 @@ body {
   border-radius: 8px !important;
 }
 
-.leaflet-draw-toolbar a {
-  background-color: #1e293b !important;
-  border-bottom: 1px solid #334155 !important;
+.disable-draw .leaflet-draw {
+  display: none !important;
 }
 
-.leaflet-draw-toolbar a:hover {
+/* Custom Leaflet Draw Buttons */
+.leaflet-draw.leaflet-control { /* Move controls slightly */
+  margin-top: 15px !important;
+  margin-left: 15px !important;
+  box-shadow: none !important;
+  border: none !important;
+}
+
+.leaflet-draw-toolbar {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 12px !important;
+  background: transparent !important;
+  border: none !important;
+}
+
+.leaflet-draw-toolbar > a {
+  width: 150px !important;
+  height: 40px !important;
+  line-height: normal !important;
+  border-radius: 6px !important;
+  background-image: none !important;
+  background-color: #0ea5e9 !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  font-family: inherit !important;
+  font-size: 13px !important;
+  text-decoration: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  filter: none !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5) !important;
+  transition: all 0.2s ease !important;
+  border: none !important;
+}
+
+.leaflet-draw-toolbar > a:hover {
+  background-color: #0284c7 !important;
+  transform: translateY(-2px) !important;
+}
+
+.leaflet-draw-draw-polygon::before {
+  content: "✏️ Draw Land";
+}
+.leaflet-draw-edit-edit::before {
+  content: "📝 Edit Record";
+}
+.leaflet-draw-edit-remove::before {
+  content: "🗑️ Delete Record";
+}
+
+/* Adjust position of the Sub Menu (Save / Cancel) */
+.leaflet-draw-actions {
+  left: 160px !important; /* 150px width + 10px spacing */
+  top: 0 !important;
+  background: #1e293b !important;
+  border: 1px solid #334155 !important;
+  border-radius: 6px !important;
+  padding: 4px !important;
+  white-space: nowrap !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5) !important;
+}
+
+.leaflet-draw-actions li {
+  margin: 0 2px !important;
+  display: inline-block !important;
+}
+
+.leaflet-draw-actions li {
+  margin: 0 !important;
+}
+
+.leaflet-draw-actions a {
   background-color: #334155 !important;
+  color: #f1f5f9 !important;
+  font-weight: normal !important;
+  font-size: 11px !important;
+  padding: 6px 10px !important;
+  border-radius: 4px !important;
+  margin: 0 !important;
+  display: inline-block !important;
+  text-decoration: none !important;
 }
 
-/* Fix for missing icons - using filters to make them white/visible on dark */
-.leaflet-draw-toolbar a {
-  filter: invert(100%) brightness(200%);
+.leaflet-draw-actions a:hover {
+  background-color: #475569 !important;
+}
+
+/* Hide Clear All from editing toolbar */
+a[title="Clear All"] {
+  display: none !important;
 }
 
 .leaflet-popup-tip {

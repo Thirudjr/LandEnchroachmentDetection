@@ -86,6 +86,40 @@ app.post("/govland", async (req, res) => {
   }
 });
 
+app.put("/govland/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { coords } = req.body;
+    const poly = `POLYGON((${coords.map((c) => `${c[0]} ${c[1]}`).join(",")},${coords[0][0]} ${coords[0][1]}))`;
+
+    await pool.query(
+      `
+      UPDATE gov_land SET
+        geom = ST_GeomFromText($1, 4326),
+        total_area = ST_Area(ST_Transform(ST_GeomFromText($1, 4326), 3857))
+      WHERE id = $2
+      `,
+      [poly, id]
+    );
+    res.json({ status: "updated" });
+  } catch (error) {
+    console.error("Error updating gov land:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete("/govland/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(`DELETE FROM gov_land WHERE id = $1`, [id]);
+    res.json({ status: "deleted" });
+  } catch (error) {
+    console.error("Error deleting gov land:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 app.get("/encroachments", async (req, res) => {
   try {
     const r = await pool.query(

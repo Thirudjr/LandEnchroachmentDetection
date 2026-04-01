@@ -14,6 +14,24 @@ L.Icon.Default.mergeOptions({
   shadowUrl: require("leaflet/dist/images/marker-shadow.png"),
 });
 
+L.drawLocal.draw.toolbar.actions.title = 'Cancel drawing';
+L.drawLocal.draw.toolbar.actions.text = 'Cancel';
+L.drawLocal.draw.toolbar.finish.title = 'Save as government record';
+L.drawLocal.draw.toolbar.finish.text = 'Save Gov Record';
+L.drawLocal.draw.toolbar.undo.title = 'Delete last point drawn';
+L.drawLocal.draw.toolbar.undo.text = 'Undo point';
+
+L.drawLocal.edit.toolbar.actions.save.title = 'Save changes';
+L.drawLocal.edit.toolbar.actions.save.text = 'Save';
+L.drawLocal.edit.toolbar.actions.cancel.title = 'Cancel editing, discards all changes';
+L.drawLocal.edit.toolbar.actions.cancel.text = 'Cancel';
+L.drawLocal.edit.toolbar.actions.clearAll.text = 'Clear All';
+
+L.drawLocal.edit.toolbar.buttons.edit = 'Edit Record';
+L.drawLocal.edit.toolbar.buttons.editDisabled = 'No records to edit';
+L.drawLocal.edit.toolbar.buttons.remove = 'Delete Record';
+L.drawLocal.edit.toolbar.buttons.removeDisabled = 'No records to delete';
+
 function App() {
   const mapContainer = useRef(null);
   const mapContainer2 = useRef(null);
@@ -28,15 +46,18 @@ function App() {
   const [modalType, setModalType] = useState(null);
   const [currentCoords, setCurrentCoords] = useState(null); // Will store as [lng, lat] for backend consistency
   const [formData, setFormData] = useState({ owner: "", phone: "", email: "" });
-  const [mlImages, setMlImages] = useState({ base: null, current: null });
-  const [mlResult, setMlResult] = useState(null);
-  const [analyzing, setAnalyzing] = useState(false);
   const [splitMode, setSplitMode] = useState(false);
   const [swipeMode, setSwipeMode] = useState(false);
   const [swipeValue, setSwipeValue] = useState(50);
   const [histSource, setHistSource] = useState('clarity');
+  const [activeMap, setActiveMap] = useState('old'); // 'old' or 'recent'
+  const primaryLayerRef = useRef(null);
   const historicalLayerRef = useRef(null);
   const historicalLayerRef2 = useRef(null);
+
+  // Remaining ML states kept for modal fallback if needed
+  const [mlResult, setMlResult] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
 
   // Sync function helper
   const syncMaps = useCallback((source, target) => {
@@ -49,6 +70,19 @@ function App() {
       const res = await fetch("http://localhost:5001/govlands");
       const data = await res.json();
       setGovLands(data);
+
+      drawnItemsRef.current.eachLayer(layer => {
+        if (layer.feature && layer.feature.properties && layer.feature.properties.type === 'govland') {
+          drawnItemsRef.current.removeLayer(layer);
+        }
+      });
+      if (drawnItemsRef2.current) {
+        drawnItemsRef2.current.eachLayer(layer => {
+          if (layer.feature && layer.feature.properties && layer.feature.properties.type === 'govland') {
+            drawnItemsRef2.current.removeLayer(layer);
+          }
+        });
+      }
 
       data.forEach((l) => {
         const g = JSON.parse(l.geom);
@@ -66,8 +100,25 @@ function App() {
           </div>
         `;
 
-        L.geoJSON(g, { style }).bindPopup(popup).addTo(mapRef.current);
-        if (mapRef2.current) L.geoJSON(g, { style }).bindPopup(popup).addTo(mapRef2.current);
+        const geo = L.geoJSON(g, { style });
+        geo.eachLayer(layer => {
+          layer.bindPopup(popup);
+          layer.feature = layer.feature || { type: 'Feature', properties: {} };
+          layer.feature.properties.id = l.id;
+          layer.feature.properties.type = 'govland';
+          drawnItemsRef.current.addLayer(layer);
+
+          if (mapRef2.current) {
+            const mirrorGeo = L.geoJSON(g, { style });
+            mirrorGeo.eachLayer(mLayer => {
+              mLayer.bindPopup(popup);
+              mLayer.feature = mLayer.feature || { type: 'Feature', properties: {} };
+              mLayer.feature.properties.id = l.id;
+              mLayer.feature.properties.type = 'govland';
+              drawnItemsRef2.current.addLayer(mLayer);
+            });
+          }
+        });
       });
     } catch (err) {
       console.error("Failed to load gov lands", err);
@@ -114,15 +165,20 @@ function App() {
       historicalLayerRef.current.addTo(mapRef.current);
 
       // Primary Layer (Current Satellite)
-      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      primaryLayerRef.current = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
         attribution: 'Esri World Imagery',
         className: 'current-satellite-layer'
-      }).addTo(mapRef.current);
+      });
+      // Default is Old Map (primary hidden). Layer toggle handled in separate effect.
 
       mapRef.current.addLayer(drawnItemsRef.current);
 
       const drawControl = new L.Control.Draw({
-        edit: { featureGroup: drawnItemsRef.current },
+        edit: { 
+          featureGroup: drawnItemsRef.current,
+          edit: false,
+          remove: true
+        },
         draw: {
           polygon: { allowIntersection: false, showArea: true, shapeOptions: { color: '#38bdf8' } },
           polyline: false, rectangle: false, circle: false, marker: false, circlemarker: false,
@@ -141,21 +197,55 @@ function App() {
         }
 
         setCurrentCoords(layer.toGeoJSON().geometry.coordinates[0]);
+        setModalType('G'); // Directly choose Gov Record
         setShowModal(true);
+      });
+
+      mapRef.current.on(L.Draw.Event.EDITED, async (e) => {
+        const layers = e.layers;
+        const updatePromises = [];
+        layers.eachLayer((layer) => {
+          if (layer.feature && layer.feature.properties && layer.feature.properties.id) {
+            const coords = layer.toGeoJSON().geometry.coordinates[0];
+            updatePromises.push(
+              fetch(`http://localhost:5001/govland/${layer.feature.properties.id}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ coords })
+              })
+            );
+          }
+        });
+        await Promise.all(updatePromises);
+        loadGovLands();
+      });
+
+      mapRef.current.on(L.Draw.Event.DELETED, async (e) => {
+        const layers = e.layers;
+        if (window.confirm("Are you sure you want to completely delete these records?")) {
+          const deletePromises = [];
+          layers.eachLayer((layer) => {
+            if (layer.feature && layer.feature.properties && layer.feature.properties.id) {
+              deletePromises.push(
+                fetch(`http://localhost:5001/govland/${layer.feature.properties.id}`, {
+                  method: "DELETE"
+                })
+              );
+            }
+          });
+          await Promise.all(deletePromises);
+          loadGovLands();
+        } else {
+          loadGovLands(); // Undo local delete
+        }
       });
     }
 
     if (splitMode && !mapRef2.current) {
       mapRef2.current = L.map(mapContainer2.current).setView(mapRef.current.getCenter(), mapRef.current.getZoom());
 
-      const historicalSources = {
-        osm: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-        clarity: 'https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        natgeo: 'https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}',
-      };
-
-      historicalLayerRef2.current = L.tileLayer(historicalSources[histSource], {
-        attribution: 'Historical Comparison'
+      historicalLayerRef2.current = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Recent Satellite Comparison'
       }).addTo(mapRef2.current);
 
       mapRef2.current.addLayer(drawnItemsRef2.current);
@@ -182,9 +272,7 @@ function App() {
     if (historicalLayerRef.current) {
       historicalLayerRef.current.setUrl(historicalSources[histSource]);
     }
-    if (historicalLayerRef2.current) {
-      historicalLayerRef2.current.setUrl(historicalSources[histSource]);
-    }
+    // We intentionally ignore historicalLayerRef2 because it should lock to recent satellite!
 
     loadGovLands();
     loadEncroachments();
@@ -198,6 +286,20 @@ function App() {
       }
     };
   }, [splitMode, loadGovLands, loadEncroachments, syncMaps, histSource]);
+
+  useEffect(() => {
+    if (primaryLayerRef.current && mapRef.current) {
+      if (swipeMode || activeMap === 'recent') {
+        if (!mapRef.current.hasLayer(primaryLayerRef.current)) {
+          primaryLayerRef.current.addTo(mapRef.current);
+        }
+      } else {
+        if (mapRef.current.hasLayer(primaryLayerRef.current)) {
+          primaryLayerRef.current.removeFrom(mapRef.current);
+        }
+      }
+    }
+  }, [activeMap, swipeMode]);
 
   const handleSave = async () => {
     if (!modalType) return;
@@ -327,11 +429,29 @@ function App() {
         </div>
 
         <div className="sidebar-section">
+          <h3>Map View</h3>
+          <div className="tool-buttons">
+            <button
+              className={`btn btn-sm ${activeMap === 'old' && !splitMode ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => { setActiveMap('old'); setSplitMode(false); setSwipeMode(false); }}
+            >
+              🕰️ Old Map
+            </button>
+            <button
+              className={`btn btn-sm ${activeMap === 'recent' && !splitMode ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => { setActiveMap('recent'); setSplitMode(false); setSwipeMode(false); }}
+            >
+              🛰️ Most Recent Map
+            </button>
+          </div>
+        </div>
+
+        <div className="sidebar-section">
           <h3>Tools & Analysis</h3>
           <div className="tool-buttons">
             <button
               className={`btn btn-sm ${splitMode ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => { setSplitMode(!splitMode); setSwipeMode(false); }}
+              onClick={() => { setSplitMode(!splitMode); setSwipeMode(false); setActiveMap('old'); }}
             >
               {splitMode ? "🗙 Disable Split" : "🗖 Dual Map View"}
             </button>
@@ -372,43 +492,14 @@ function App() {
           </div>
         </div>
 
-        <div className="sidebar-section ml-section">
-          <h3>ML Change Detection</h3>
-          <p className="section-desc">Compare historical vs current snapshots.</p>
-          <div className="ml-controls">
-            <div className="file-input-group">
-              <label>Snapshot A (Historical)</label>
-              <input type="file" onChange={(e) => setMlImages({ ...mlImages, base: e.target.files[0] })} />
-            </div>
-            <div className="file-input-group">
-              <label>Snapshot B (Current/Live)</label>
-              <input type="file" onChange={(e) => setMlImages({ ...mlImages, current: e.target.files[0] })} />
-            </div>
 
-            <button
-              className={`btn btn-sm ${analyzing ? 'loading' : 'btn-primary'}`}
-              onClick={handleMLAnalysis}
-              disabled={analyzing}
-            >
-              {analyzing ? "AI Analyzing..." : "Run AI Comparison"}
-            </button>
-
-            {mlResult && (
-              <div className={`ml-result ${mlResult.change_detected ? 'detected' : 'safe'}`}>
-                <strong>AI Status: {mlResult.change_detected ? "Encroachment Detected!" : "No Physical Change"}</strong>
-                <span>Change: {mlResult.change_percentage}%</span>
-                <span>Similarity: {(mlResult.similarity_score * 100).toFixed(1)}%</span>
-              </div>
-            )}
-          </div>
-        </div>
 
         <div className="sidebar-footer">
           <p>Government Portal | Real-Time Monitoring</p>
         </div>
       </div>
 
-      <div className={`map-wrapper ${splitMode ? 'split' : ''} ${swipeMode ? 'swipe' : ''}`}>
+      <div className={`map-wrapper ${splitMode ? 'split' : ''} ${swipeMode ? 'swipe' : ''} ${activeMap === 'recent' && !splitMode ? 'disable-draw' : ''}`}>
         <div className="map-panel" ref={mapContainer}>
           {swipeMode && (
             <div className="swipe-control">
