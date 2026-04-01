@@ -67,14 +67,15 @@ def detect_structural_features(image):
     # 0. Denoise dirt textures while keeping building edges sharp
     filtered = cv2.bilateralFilter(gray, 9, 75, 75)
     
-    # 1. Architectural Lines & Contours
-    edges = cv2.Canny(filtered, 40, 120)
+    # 1. Architectural Lines & Contours - Optimized for modern structures
+    # Using adaptive thresholding for better man-made structure contrast
+    edges = cv2.Canny(filtered, 30, 100)
     
     # Morphological closing to seal building walls
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
     
-    lines = cv2.HoughLinesP(closed_edges, 1, np.pi/180, threshold=30, minLineLength=15, maxLineGap=15)
+    lines = cv2.HoughLinesP(closed_edges, 1, np.pi/180, threshold=20, minLineLength=10, maxLineGap=10)
     line_count = len(lines) if lines is not None else 0
 
     # 1b. Polygons (Rigid Buildings)
@@ -82,14 +83,16 @@ def detect_structural_features(image):
     buildings = 0
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if 50 < area < 5000:  # Size of a reasonable building footprint
-            approx = cv2.approxPolyDP(cnt, 0.04 * cv2.arcLength(cnt, True), True)
-            if 4 <= len(approx) <= 6:  # Squares, rectangles, tight clusters
+        # Expanded range to catch smaller single rooms or larger sheds
+        if 40 < area < 8000:  
+            approx = cv2.approxPolyDP(cnt, 0.03 * cv2.arcLength(cnt, True), True)
+            # Architectural footprints are usually 4-8 corners (rectangles, L-shapes, U-shapes)
+            if 4 <= len(approx) <= 8:
                 buildings += 1
 
-    # 2. Architectural Corners (Use filtered image to ignore dirt noise)
+    # 2. Architectural Corners
     corners = cv2.cornerHarris(filtered, 2, 3, 0.04)
-    corner_count = np.sum(corners > 0.005 * corners.max())
+    corner_count = np.sum(corners > 0.002 * corners.max())
 
     # 3. Laplacian Variance 
     variance = cv2.Laplacian(filtered, cv2.CV_64F).var()
@@ -104,8 +107,8 @@ async def detect_change(
     # Load and Prepare
     img1 = process_image(await base_image.read())
     img2 = process_image(await current_image.read())
-    img1 = cv2.resize(img1, (600, 600))
-    img2 = cv2.resize(img2, (600, 600))
+    img1 = cv2.resize(img1, (640, 640))
+    img2 = cv2.resize(img2, (640, 640))
 
     # STAGE 1: ALIGNMENT
     img2, aligned = align_images(img1, img2)
@@ -119,30 +122,26 @@ async def detect_change(
     lines2, corners2, var2, bld2 = detect_structural_features(img2)
 
     # STAGE 3: WEIGHTED FORENSIC SCORING
-    # The golden rule: "Positive Structural Gain". Color/season changes DO NOT overrule structural evidence.
+    # We focus on Positive Structural Gain (PSG)
     line_gain = max(0, lines2 - lines1)
     corner_gain = max(0, corners2 - corners1)
     building_gain = max(0, bld2 - bld1)
 
-    # Structural components carry immense weight for rigid man-made objects
-    score_lines = line_gain * 3
-    score_corners = corner_gain / 5
-    score_buildings = building_gain * 40 # Heavily flags actual rectangles/buildings
+    # Increased weights for architectural features
+    score_lines = line_gain * 4
+    score_corners = corner_gain / 4
+    score_buildings = building_gain * 50 # Significant weight for new geometric shapes
 
-    # SSIM evaluates overall layout, but is only factored in IF there's structural gain
-    score_ssim = 0
-    if (score_lines + score_corners + score_buildings) > 10:
-        score_ssim = max(0, (0.85 - ssim_score) * 100)
-    elif ssim_score < 0.55: # Extreme land destruction (e.g. massive quarrying)
-        score_ssim = max(0, (0.75 - ssim_score) * 50)
+    # SSIM evaluates overall layout changes
+    score_ssim = max(0, (0.90 - ssim_score) * 60)
 
     final_decision_score = score_ssim + score_lines + score_corners + score_buildings
 
     # DETECTION LOGIC: 
-    # Must cross the rigid evidence threshold
-    is_encroachment = final_decision_score > 45
+    # Lowered threshold to 35 to catch early-stage or smaller encroachments
+    is_encroachment = final_decision_score > 35
 
-    confidence = min(100, int((final_decision_score / 150) * 100))
+    confidence = min(100, int((final_decision_score / 120) * 100))
 
     return {
         "change_detected": bool(is_encroachment),
