@@ -63,6 +63,12 @@ function App() {
   const historicalLayerRef = useRef(null);
   const historicalLayerRef2 = useRef(null);
 
+  const [isEncroachmentCheckMode, setIsEncroachmentCheckMode] = useState(false);
+  const isEncroachmentCheckRef = useRef(false);
+  const [encroachmentResults, setEncroachmentResults] = useState(null);
+  const [isAnalyzingMultiple, setIsAnalyzingMultiple] = useState(false);
+  const [currentAnalyzingLand, setCurrentAnalyzingLand] = useState("");
+
   // Remaining ML states kept for modal fallback if needed
   const [mlResult, setMlResult] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -209,8 +215,15 @@ function App() {
         }
 
         setCurrentCoords(layer.toGeoJSON().geometry.coordinates[0]);
-        setModalType('G'); // Directly choose Gov Record
-        setShowModal(true);
+        
+        setCurrentCoords(layer.toGeoJSON().geometry.coordinates[0]);
+        
+        if (isEncroachmentCheckRef.current) {
+          handleBulkEncroachmentCheck(layer.toGeoJSON().geometry.coordinates[0], layer);
+        } else {
+          setModalType('G'); // Directly choose Gov Record
+          setShowModal(true);
+        }
       });
 
       mapRef.current.on(L.Draw.Event.EDITED, async (e) => {
@@ -350,6 +363,99 @@ function App() {
     setShowModal(false);
     setModalType(null);
     setFormData({ owner: "", phone: "", email: "" });
+  };
+
+  const handleBulkEncroachmentCheck = async (coords, layer) => {
+    // Immediately remove from map so it disappears
+    mapRef.current.removeLayer(layer);
+    drawnItemsRef.current.removeLayer(layer);
+    
+    // Reset check mode
+    isEncroachmentCheckRef.current = false;
+    setIsEncroachmentCheckMode(false);
+
+    try {
+      // 1. Identify which lands are in this area
+      const res = await fetch("http://localhost:5001/check-multiple-encroachments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ coords }),
+      });
+      const data = await res.json();
+      
+      if (data.count === 0) {
+        setEncroachmentResults({ count: 0, lands: [] });
+        setModalType('BULK');
+        setShowModal(true);
+        return;
+      }
+
+      // 2. Perform AI Scan for each land independently
+      setIsAnalyzingMultiple(true);
+      setModalType('BULK');
+      setShowModal(true);
+      
+      const detailedResults = [];
+      for (const land of data.lands) {
+        setCurrentAnalyzingLand(land.name);
+        
+        // Find the layer for this land to get bounds
+        let targetLayer = null;
+        drawnItemsRef.current.eachLayer(l => {
+          if (l.feature?.properties?.id === land.id) targetLayer = l;
+        });
+
+        if (targetLayer) {
+          const bounds = targetLayer.getBounds();
+          mapRef.current.fitBounds(bounds, { maxZoom: 18 });
+          await new Promise(r => setTimeout(r, 1000)); // Wait for tile load
+
+          // Capture Archival vs Current
+          const histMap = L.map('hidden-map-base', { zoomControl: false, attributionControl: false }).fitBounds(bounds, { maxZoom: 18 });
+          const recMap = L.map('hidden-map-curr', { zoomControl: false, attributionControl: false }).fitBounds(bounds, { maxZoom: 18 });
+          
+          L.tileLayer(historicalSources[histSource] || historicalSources.osm).addTo(histMap);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}').addTo(recMap);
+          
+          await new Promise(r => setTimeout(r, 1500));
+          
+          const blob1 = await new Promise((resolve) => {
+            leafletImage(recMap, (err, canvas) => {
+              if (err) resolve(null); else canvas.toBlob(resolve, 'image/png');
+            }); 
+          });
+          const blob2 = await new Promise((resolve) => {
+            leafletImage(histMap, (err, canvas) => {
+              if (err) resolve(null); else canvas.toBlob(resolve, 'image/png');
+            }); 
+          });
+
+          histMap.remove();
+          recMap.remove();
+
+          if (blob1 && blob2) {
+            const formData = new FormData();
+            formData.append("base_image", blob2);
+            formData.append("current_image", blob1);
+            const aiRes = await fetch("http://localhost:8000/detect", { method: "POST", body: formData });
+            const aiData = await aiRes.json();
+            
+            detailedResults.push({
+              ...land,
+              ai: aiData
+            });
+          }
+        }
+      }
+
+      setEncroachmentResults({ count: detailedResults.length, lands: detailedResults });
+    } catch (err) {
+      console.error("Bulk AI check failed", err);
+      alert("Error during multi-land AI analysis.");
+    } finally {
+      setIsAnalyzingMultiple(false);
+      setCurrentAnalyzingLand("");
+    }
   };
 
   const handleCsvUpload = (e) => {
@@ -543,6 +649,22 @@ function App() {
               {splitMode ? "🗙 Disable Split" : "🗖 Dual Map View"}
             </button>
             <button
+              className={`btn btn-sm ${isEncroachmentCheckMode ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => {
+                const NewState = !isEncroachmentCheckMode;
+                setIsEncroachmentCheckMode(NewState);
+                isEncroachmentCheckRef.current = NewState;
+                
+                if (NewState) {
+                   const polygonDrawer = new L.Draw.Polygon(mapRef.current, { shapeOptions: { color: "#ef4444" } });
+                   polygonDrawer.enable();
+                }
+              }}
+              style={{ border: isEncroachmentCheckMode ? "none" : "1px solid #ef4444", color: isEncroachmentCheckMode ? "" : "#ef4444" }}
+            >
+              🕵️ Check Area Encroachment
+            </button>
+            <button
               className="btn btn-sm btn-ghost"
               onClick={() => fileInputRef.current.click()}
               style={{ border: "1px dashed #38bdf8", marginTop: "10px" }}
@@ -691,6 +813,43 @@ function App() {
                       <button className="btn btn-primary" onClick={() => setShowModal(false)} style={{ marginTop: "20px", width: "100%" }}>Acknowledge</button>
                     </div>
                   ) : null}
+                </>
+              ) : modalType === 'BULK' ? (
+                <>
+                  <h2>Area Analysis Results</h2>
+                  {isAnalyzingMultiple ? (
+                    <div style={{ padding: "40px 0", textAlign: "center" }}>
+                      <div className="spinner" style={{ margin: "0 auto 20px auto", width: "40px", height: "40px", border: "4px solid #f3f3f3", borderTop: "4px solid #ef4444", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                      <p>Running Independent AI Scan for:</p>
+                      <strong style={{ color: "#ef4444" }}>{currentAnalyzingLand}</strong>
+                    </div>
+                  ) : encroachmentResults && (
+                    <div className="encroachment-results">
+                      {encroachmentResults.count > 0 ? (
+                        <>
+                          <p className="danger text-lg">⚠️ {encroachmentResults.count} Regulated Areas Analyzed</p>
+                          <div className="results-list" style={{ maxHeight: "300px", overflowY: "auto", margin: "15px 0" }}>
+                            {encroachmentResults.lands.map((land, idx) => (
+                              <div key={idx} style={{ padding: "12px", borderBottom: "1px solid #eee", textAlign: "left", background: land.ai?.change_detected ? "#fff1f2" : "#f0fdf4", marginBottom: "8px", borderRadius: "6px" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                  <strong style={{ color: "#000" }}>{land.name}</strong>
+                                  <span style={{ fontSize: "10px", fontWeight: "bold", padding: "2px 6px", borderRadius: "4px", background: land.ai?.change_detected ? "#ef4444" : "#22c55e", color: "white" }}>
+                                    {land.ai?.change_detected ? 'ENCROACHED' : 'SECURE'}
+                                  </span>
+                                </div>
+                                <div style={{ marginTop: "5px", fontSize: "12px", color: "#64748b" }}>
+                                   Structural Change: {land.ai?.change_percentage}% | Score: {land.ai?.structural_score}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="safe text-lg">✅ No Government Lands Encroached in this area.</p>
+                      )}
+                      <button className="btn btn-primary" onClick={() => { setShowModal(false); setModalType(null); setEncroachmentResults(null); }} style={{ width: "100%" }}>Done</button>
+                    </div>
+                  )}
                 </>
               ) : null}
             </div>

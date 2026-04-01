@@ -180,6 +180,41 @@ app.post("/newland", async (req, res) => {
   }
 });
 
+app.post("/check-multiple-encroachments", async (req, res) => {
+  try {
+    const { coords } = req.body;
+    const poly = `POLYGON((${coords.map((c) => `${c[0]} ${c[1]}`).join(",")},${coords[0][0]} ${coords[0][1]}))`;
+
+    const result = await pool.query(
+      `
+      SELECT 
+        id,
+        owner_name, 
+        total_area,
+        ST_AsGeoJSON(geom) as geom,
+        ST_Area(ST_Transform(ST_Intersection(geom, ST_GeomFromText($1, 4326)), 3857)) AS encroached_part_area
+      FROM gov_land 
+      WHERE ST_Intersects(geom, ST_GeomFromText($1, 4326))
+      `,
+      [poly]
+    );
+
+    res.json({
+      count: result.rowCount,
+      lands: result.rows.map(row => ({
+        id: row.id,
+        name: row.owner_name,
+        total_area: row.total_area,
+        geom: row.geom,
+        encroached_area: parseFloat(row.encroached_part_area)
+      }))
+    });
+  } catch (error) {
+    console.error("Error checking multiple encroachments:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.get("/govlands", async (req, res) => {
   try {
     const result = await pool.query(
