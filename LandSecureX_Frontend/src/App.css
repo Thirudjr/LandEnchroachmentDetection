@@ -269,6 +269,17 @@ body {
   display: none !important;
 }
 
+/* Hidden Map Instances for Background ML Jobs */
+.hidden-map-capture {
+  position: absolute !important;
+  top: -9999px !important;
+  left: -9999px !important;
+  width: 600px !important;
+  height: 600px !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
 /* Custom Leaflet Draw Buttons */
 .leaflet-draw.leaflet-control { /* Move controls slightly */
   margin-top: 15px !important;

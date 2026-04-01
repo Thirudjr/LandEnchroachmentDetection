@@ -4,6 +4,7 @@ import "leaflet/dist/leaflet.css";
 import "leaflet-draw/dist/leaflet.draw.css";
 import "leaflet-draw";
 import leafletImage from "leaflet-image";
+import Papa from "papaparse";
 import "./App.css";
 
 // Fix Leaflet marker icons which sometimes don't load correctly in React
@@ -33,12 +34,19 @@ L.drawLocal.edit.toolbar.buttons.remove = 'Delete Record';
 L.drawLocal.edit.toolbar.buttons.removeDisabled = 'No records to delete';
 
 function App() {
+  const historicalSources = {
+    osm: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    clarity: 'https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    natgeo: 'https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}',
+  };
+
   const mapContainer = useRef(null);
   const mapContainer2 = useRef(null);
   const mapRef = useRef(null);
   const mapRef2 = useRef(null);
   const drawnItemsRef = useRef(new L.FeatureGroup());
   const drawnItemsRef2 = useRef(new L.FeatureGroup());
+  const fileInputRef = useRef(null);
 
   const [govLands, setGovLands] = useState([]);
   const [encroachments, setEncroachments] = useState([]);
@@ -94,9 +102,13 @@ function App() {
             <strong>Area:</strong> ${l.total_area.toFixed(2)} m²<br/>
             <hr style="border: 0.5px solid #cbd5e1; margin: 8px 0;"/>
             <a href="http://localhost:5001/generate-report/${l.id}" target="_blank" 
-               style="display: block; background: #0ea5e9; color: white; text-align: center; padding: 5px; border-radius: 4px; text-decoration: none; font-size: 11px; font-weight: bold;">
+               style="display: block; background: #0ea5e9; color: white; text-align: center; padding: 5px; border-radius: 4px; text-decoration: none; font-size: 11px; font-weight: bold; margin-bottom: 5px;">
                📄 Download Official Report
             </a>
+            <button onclick="window.triggerEncroachmentCheck(${l.id})" 
+               style="display: block; width: 100%; background: #ef4444; color: white; text-align: center; padding: 5px; border-radius: 4px; border: none; cursor: pointer; font-size: 11px; font-weight: bold;">
+               🔍 Run Encroachment Check
+            </button>
           </div>
         `;
 
@@ -340,78 +352,153 @@ function App() {
     setFormData({ owner: "", phone: "", email: "" });
   };
 
-  const runAutomatedAIScan = async () => {
-    if (!mapRef.current || !mapRef2.current) {
-      alert("Please enable Dual Map View/Split Mode for Automated AI Scan.");
-      return;
-    }
+  const handleCsvUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-    setAnalyzing(true);
-    try {
-      // 1. Capture Current Satellite Map (Map 1)
-      const blob1 = await new Promise((resolve) => {
-        leafletImage(mapRef.current, (err, canvas) => {
-          if (err) { console.error(err); resolve(null); }
-          canvas.toBlob(resolve, 'image/png');
-        });
-      });
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: async (results) => {
+        const records = results.data;
+        let successCount = 0;
+        let errorCount = 0;
 
-      // 2. Capture Historical Map (Map 2)
-      const blob2 = await new Promise((resolve) => {
-        leafletImage(mapRef2.current, (err, canvas) => {
-          if (err) { console.error(err); resolve(null); }
-          canvas.toBlob(resolve, 'image/png');
-        });
-      });
+        for (const record of records) {
+          try {
+            // Expecting coords as "long1 lat1, long2 lat2, long3 lat3..."
+            const coordString = record.coordinates || record.coords;
+            const owner = record.owner || record.owner_name;
+            const phone = record.phone || "";
+            const email = record.email || "";
 
-      if (!blob1 || !blob2) throw new Error("Could not capture map snapshots.");
+            if (!coordString || !owner) {
+              console.warn("Skipping invalid record:", record);
+              errorCount++;
+              continue;
+            }
 
-      const formData = new FormData();
-      formData.append("base_image", blob2); // Historical
-      formData.append("current_image", blob1); // Current
+            const coords = coordString.split(",").map(pair => {
+              const [lng, lat] = pair.trim().split(/\s+/).map(Number);
+              return [lng, lat];
+            });
 
-      const res = await fetch("http://localhost:8000/detect", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      setMlResult(data);
-    } catch (err) {
-      console.error("AI Scan Error:", err);
-      alert("Automated AI Scan failed. Ensure ML Engine is running on Port 8000.");
-    } finally {
-      setAnalyzing(false);
-    }
+            await fetch("http://localhost:5001/govland", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ coords, owner, phone, email }),
+            });
+            successCount++;
+          } catch (err) {
+            console.error("Failed to upload record:", record, err);
+            errorCount++;
+          }
+        }
+
+        alert(`Bulk upload complete!\nSuccess: ${successCount}\nErrors: ${errorCount}`);
+        loadGovLands();
+        
+        // Zoom to first new record if available
+        if (successCount > 0 && records[0]) {
+           const firstCoord = records[0].coordinates || records[0].coords;
+           const [lng, lat] = firstCoord.split(",")[0].trim().split(/\s+/).map(Number);
+           mapRef.current.setView([lat, lng], 15);
+        }
+      }
+    });
+    // Reset file input
+    e.target.value = null;
   };
 
-  const handleMLAnalysis = async () => {
-    if (!mlImages.base || !mlImages.current) {
-      alert("Please upload both snapshots first.");
-      return;
-    }
+  useEffect(() => {
+    window.triggerEncroachmentCheck = (id) => runEncroachmentCheck(id);
+    return () => delete window.triggerEncroachmentCheck;
+  }, [govLands, splitMode, histSource]);
+
+  const runEncroachmentCheck = async (id) => {
+    let targetLayer = null;
+    drawnItemsRef.current.eachLayer(layer => {
+      if (layer.feature?.properties?.id === id) targetLayer = layer;
+    });
+    if (!targetLayer) return;
 
     setAnalyzing(true);
     setMlResult(null);
-
-    const formData = new FormData();
-    formData.append("base_image", mlImages.base);
-    formData.append("current_image", mlImages.current);
+    setModalType('AI');
+    setShowModal(true);
 
     try {
-      const res = await fetch("http://localhost:8000/detect", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      setMlResult(data);
+      const bounds = targetLayer.getBounds();
+      mapRef.current.fitBounds(bounds, { maxZoom: 18 });
+
+      if (splitMode) {
+        await new Promise(r => setTimeout(r, 1000));
+        const blob1 = await new Promise((resolve) => {
+          leafletImage(mapRef2.current, (err, canvas) => {
+            if (err) resolve(null); else canvas.toBlob(resolve, 'image/png');
+          }); 
+        });
+        const blob2 = await new Promise((resolve) => {
+          leafletImage(mapRef.current, (err, canvas) => {
+            if (err) resolve(null); else canvas.toBlob(resolve, 'image/png');
+          }); 
+        });
+
+        if (!blob1 || !blob2) throw new Error("Could not capture maps.");
+        const formData = new FormData();
+        formData.append("base_image", blob2);
+        formData.append("current_image", blob1);
+        const res = await fetch("http://localhost:8000/detect", { method: "POST", body: formData });
+        setMlResult(await res.json());
+      } else {
+        const histMap = L.map('hidden-map-base', { zoomControl: false, attributionControl: false }).fitBounds(bounds, { maxZoom: 18 });
+        const recMap = L.map('hidden-map-curr', { zoomControl: false, attributionControl: false }).fitBounds(bounds, { maxZoom: 18 });
+        
+        L.tileLayer(historicalSources[histSource] || historicalSources.osm).addTo(histMap);
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}').addTo(recMap);
+        
+        await new Promise(r => setTimeout(r, 1500));
+        
+        const blob1 = await new Promise((resolve) => {
+          leafletImage(recMap, (err, canvas) => {
+            if (err) resolve(null); else canvas.toBlob(resolve, 'image/png');
+          }); 
+        });
+        const blob2 = await new Promise((resolve) => {
+          leafletImage(histMap, (err, canvas) => {
+            if (err) resolve(null); else canvas.toBlob(resolve, 'image/png');
+          }); 
+        });
+
+        histMap.remove();
+        recMap.remove();
+        
+        if (!blob1 || !blob2) throw new Error("Could not capture background maps.");
+        
+        const formData = new FormData();
+        formData.append("base_image", blob2);
+        formData.append("current_image", blob1);
+        const res = await fetch("http://localhost:8000/detect", { method: "POST", body: formData });
+        setMlResult(await res.json());
+      }
     } catch (err) {
-      console.error("ML Service Error:", err);
-      alert("ML Engine Offline. Please start main.py in LandsecureX_ML folder.");
+      console.error("AI Scan Error:", err);
+      alert("ML Engine Error. Check if python main.py is running!");
+      setShowModal(false);
     } finally {
       setAnalyzing(false);
     }
   };
 
+  const zoomToRecord = (id) => {
+    drawnItemsRef.current.eachLayer(layer => {
+      if (layer.feature && layer.feature.properties && layer.feature.properties.id === id) {
+        const bounds = layer.getBounds();
+        mapRef.current.fitBounds(bounds, { padding: [50, 50], maxZoom: 18 });
+        layer.openPopup();
+      }
+    });
+  };
   return (
     <div className="app-container">
       <div className="sidebar">
@@ -456,14 +543,22 @@ function App() {
               {splitMode ? "🗙 Disable Split" : "🗖 Dual Map View"}
             </button>
             <button
-              className={`btn btn-sm ${swipeMode ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => { setSwipeMode(!swipeMode); setSplitMode(false); }}
+              className="btn btn-sm btn-ghost"
+              onClick={() => fileInputRef.current.click()}
+              style={{ border: "1px dashed #38bdf8", marginTop: "10px" }}
             >
-              {swipeMode ? "🗙 Disable Swipe" : "↔ Swipe Comparison"}
+              📥 Bulk Upload (CSV)
             </button>
+            <input
+              type="file"
+              ref={fileInputRef}
+              style={{ display: "none" }}
+              accept=".csv"
+              onChange={handleCsvUpload}
+            />
           </div>
 
-          {(splitMode || swipeMode) && (
+          {splitMode && (
             <div className="source-selector">
               <label>🕰️ Historical Base:</label>
               <select value={histSource} onChange={(e) => setHistSource(e.target.value)}>
@@ -480,12 +575,24 @@ function App() {
           <div className="record-list">
             {govLands.length === 0 ? <p className="empty-text">No records found</p> :
               govLands.map(l => (
-                <div key={l.id} className="record-item">
+                <div 
+                  key={l.id} 
+                  className="record-item" 
+                  onClick={() => zoomToRecord(l.id)}
+                  style={{ cursor: "pointer" }}
+                >
                   <div className="record-info">
                     <strong>{l.owner_name}</strong>
                     <span>{l.total_area.toFixed(0)} m²</span>
                   </div>
-                  <a href={`http://localhost:5001/generate-report/${l.id}`} className="mini-btn" title="Download Report">📄</a>
+                  <a 
+                    href={`http://localhost:5001/generate-report/${l.id}`} 
+                    className="mini-btn" 
+                    title="Download Report"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    📄
+                  </a>
                 </div>
               ))
             }
@@ -555,55 +662,45 @@ function App() {
                   <button className="btn" onClick={handleSave}>Save To Registry</button>
                   <button className="btn btn-ghost" onClick={() => { setShowModal(false); setModalType(null); }}>Cancel</button>
                 </>
-              ) : (
+              ) : modalType === 'AI' ? (
                 <>
-                  <h2>Verify Selection</h2>
-                  <p className="modal-desc">Automatic AI Scan will compare current satellite vs historical data for this area.</p>
-
-                  <div className="modal-ai-controls">
-                    <button
-                      className={`btn btn-sm ${analyzing ? 'loading' : 'btn-primary'}`}
-                      onClick={runAutomatedAIScan}
-                      disabled={analyzing}
-                    >
-                      {analyzing ? "AI Analyzing Area..." : "🚀 Run Automated AI Scan"}
-                    </button>
-                  </div>
-
-                  {mlResult && (
-                    <div className={`ml-modal-result ${mlResult.change_detected ? 'detected' : 'safe'}`}>
-                      <div className="ml-badge-row">
-                        <span className="ml-badge">{mlResult.method}</span>
-                        <span className={`ml-badge ${mlResult.alignment_status === 'LOCKED' ? 'success' : 'warning'}`}>
-                          {mlResult.alignment_status}
-                        </span>
-                      </div>
-                      <strong>AI STATUS: {mlResult.change_detected ? "Encroachment Likely" : "No Change Detected"}</strong>
-                      <div className="ml-stats">
-                        <span>Change: {mlResult.change_percentage}%</span>
-                        <span>Score: {mlResult.similarity_score.toFixed(2)}</span>
-                        <span>Structure: {mlResult.structural_score}</span>
-                      </div>
-                      <div className="ml-debug-row">
-                        <span>Lines: +{mlResult.debug_stats.new_lines}</span>
-                        <span>Corners: +{mlResult.debug_stats.new_corners}</span>
-                        <span>Noise: {mlResult.debug_stats.vars}</span>
-                      </div>
+                  <h2>AI Background Analysis</h2>
+                  {analyzing ? (
+                    <div style={{ padding: "40px 0", textAlign: "center" }}>
+                      <div className="spinner" style={{ margin: "0 auto 20px auto", width: "40px", height: "40px", border: "4px solid #f3f3f3", borderTop: "4px solid #0ea5e9", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                      <p>Processing structural changes...</p>
                     </div>
-                  )}
-
-                  <div className="modal-actions">
-                    <button className="btn danger-btn" onClick={handleSave}>Confirm Encroachment</button>
-                    <button className="btn btn-ghost" onClick={() => { setShowModal(false); setModalType(null); setMlResult(null); }}>Cancel</button>
-                  </div>
+                  ) : mlResult ? (
+                    <div className="ml-results">
+                      <div className={`status-badge ${mlResult.change_detected ? 'danger' : 'safe'}`}>
+                        {mlResult.change_detected ? '🚨 High Encroachment Probability' : '✅ Clear (No Structural Changes)'}
+                      </div>
+                      <div className="metrics-grid">
+                        <div className="metric">
+                          <span>Structural Change</span>
+                          <strong>{mlResult.change_percentage}%</strong>
+                        </div>
+                        <div className="metric">
+                          <span>Forensic Score</span>
+                          <strong>{mlResult.structural_score}</strong>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: "10px", fontSize: "12px", color: "#64748b" }}>
+                        Debug: {mlResult.debug_stats.new_lines} new signatures, {mlResult.debug_stats.new_corners} corners.
+                      </div>
+                      <button className="btn btn-primary" onClick={() => setShowModal(false)} style={{ marginTop: "20px", width: "100%" }}>Acknowledge</button>
+                    </div>
+                  ) : null}
                 </>
-              )}
+              ) : null}
             </div>
           </div>
         )}
       </div>
+
+      <div id="hidden-map-base" className="hidden-map-capture"></div>
+      <div id="hidden-map-curr" className="hidden-map-capture"></div>
     </div>
   );
 }
-
 export default App;
